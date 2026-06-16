@@ -5,9 +5,12 @@ This file documents the current VCS project configuration, network settings, rou
 ## Project Files
 
 - `atm_vcs_server.mjs`: main ATM VCS web/controller service.
+- `atm_remote_recorder.mjs`: standalone UDP recording receiver for a separate airport recording server.
 - `radios.config.json`: active radio, RTP, SNMP, recording, and application configuration.
 - `run_ubuntu.sh`: ready-to-run Ubuntu installer/service setup script.
 - `deploy/atm-vcs.service`: systemd service template.
+- `deploy/atm-remote-recorder.service`: systemd service template for the separate recorder server.
+- `scripts/install_remote_recorder_ubuntu.sh`: Ubuntu installer for the separate recorder server.
 - `README.md`: original project notes.
 - `docs/`: implementation and deployment notes.
 - `logs/`: local test logs and captured router pages.
@@ -53,7 +56,9 @@ Global VCS settings:
 - `snmpTrapPort`: `162`
 - `codec`: `pcma`
 - `ed137ExtensionMode`: `msb`
-- Recording enabled: yes
+- Recording enabled on VCS server: no
+- Local VCS recording enabled: no
+- Remote recorder forwarding: configured in software, disabled until the recorder server IP is set
 - Recording retention: 30 days
 - Recording export: MP3 through `ffmpeg`
 
@@ -215,6 +220,66 @@ If using HTTPS on port `3443`, use:
 https://SERVER_IP:3443/controller
 https://SERVER_IP:3443/admin
 https://SERVER_IP:3443/api/health
+```
+
+## Remote Airport Recording Server
+
+Recording should run on a separate server so the VCS server does not write audio files in the live RX/TX path. The current VCS configuration has recording disabled:
+
+```json
+"recording": {
+  "enabled": false,
+  "localEnabled": false
+}
+```
+
+To install the recorder on a different Ubuntu server at the airport:
+
+```bash
+cd ~/Desktop/vcshusam
+sudo bash ./scripts/install_remote_recorder_ubuntu.sh
+```
+
+The recorder service listens on:
+
+```text
+UDP ingest: 0.0.0.0:45000
+HTTP health: http://RECORDER_SERVER_IP:45080/api/health
+Recordings API: http://RECORDER_SERVER_IP:45080/api/recordings
+Recording folder: /opt/atm-recorder/remote-recordings
+```
+
+After the recorder server is installed and reachable from the VCS server, enable only remote forwarding on the VCS server:
+
+```json
+"recording": {
+  "enabled": true,
+  "localEnabled": false,
+  "remote": {
+    "enabled": true,
+    "host": "RECORDER_SERVER_IP",
+    "port": 45000,
+    "protocol": "atm-vcs-recorder-udp-v1"
+  }
+}
+```
+
+Then restart the VCS service:
+
+```bash
+sudo systemctl restart atm-vcs.service
+```
+
+To disable all recording and all recorder forwarding on the VCS server:
+
+```json
+"recording": {
+  "enabled": false,
+  "localEnabled": false,
+  "remote": {
+    "enabled": false
+  }
+}
 ```
 
 ## Manual Run Without systemd

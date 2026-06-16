@@ -32,6 +32,16 @@ sudo bash ./run_ubuntu.sh
 
 The script installs Node.js 20 if needed, installs ffmpeg, copies the app to `/opt/atm-vcs`, creates `atm-vcs.service`, starts it, and prints the controller/admin URLs.
 
+## Remote Recorder
+
+The VCS server can keep local recording disabled and forward recording audio to a separate airport recorder server. Install the recorder on the separate Ubuntu server with:
+
+```bash
+sudo bash ./scripts/install_remote_recorder_ubuntu.sh
+```
+
+Then set `recording.enabled=true`, `recording.localEnabled=false`, and `recording.remote.host` to the recorder server IP in `radios.config.json`. Leave `recording.enabled=false` to disable all VCS recording and forwarding.
+
 ## Current Defaults
 
 ```text

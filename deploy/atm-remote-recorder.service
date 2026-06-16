@@ -1,0 +1,26 @@
+[Unit]
+Description=ATM Remote Recording Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atm-recorder
+Group=atm-recorder
+WorkingDirectory=/opt/atm-recorder
+Environment=RECORDER_BIND_HOST=0.0.0.0
+Environment=RECORDER_UDP_PORT=45000
+Environment=RECORDER_HTTP_PORT=45080
+Environment=RECORDER_DIR=/opt/atm-recorder/remote-recordings
+ExecStart=/usr/bin/node /opt/atm-recorder/atm_remote_recorder.mjs
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/atm-recorder
+StandardOutput=append:/opt/atm-recorder/logs/service.out.log
+StandardError=append:/opt/atm-recorder/logs/service.err.log
+
+[Install]
+WantedBy=multi-user.target

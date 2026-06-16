@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node atm_vcs_server.mjs",
+    "recorder": "node atm_remote_recorder.mjs",
     "legacy": "node vcs_test_server.mjs"
   }
 }

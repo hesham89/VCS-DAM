@@ -34,12 +34,19 @@ const defaultConfig = {
   snmpTrapPort: Number.parseInt(process.env.SNMP_TRAP_PORT ?? "162", 10),
   recording: {
     enabled: true,
+    localEnabled: true,
     retentionDays: 30,
     retentionRunTime: "02:00",
     storageBytes: 8 * 1024 * 1024 * 1024 * 1024,
     format: "G.711 raw RTP payload with JSONL metadata",
     exportFormat: "MP3 via ffmpeg",
-    ed137RecorderInterface: "planned"
+    ed137RecorderInterface: "planned",
+    remote: {
+      enabled: false,
+      host: "",
+      port: 45000,
+      protocol: "atm-vcs-recorder-udp-v1"
+    }
   },
   radios: [
     { id: "r1", label: "Receiver 121.700", role: "rx", ip: "5.1.1.250", frequency: "121.700", mode: "ed137", sipPort: 5060, rtpPort: 3004, enabled: true },
@@ -82,6 +89,7 @@ const snmpTraps = [];
 const clients = new Set();
 const rxMonitorStarts = new Map();
 let lastTelemetryBroadcast = 0;
+const remoteRecorderSocket = dgram.createSocket("udp4");
 
 mkdirSync(logDir, { recursive: true });
 mkdirSync(recordingDir, { recursive: true });
@@ -91,14 +99,30 @@ function loadConfig() {
   if (!existsSync(configPath)) return defaultConfig;
   try {
     const parsed = JSON.parse(readFileSync(configPath, "utf8"));
-    return { ...defaultConfig, ...parsed, radios: parsed.radios ?? defaultConfig.radios };
+    return normalizeConfig(parsed);
   } catch {
     return defaultConfig;
   }
 }
 
+function normalizeConfig(nextConfig = {}) {
+  return {
+    ...defaultConfig,
+    ...nextConfig,
+    recording: {
+      ...defaultConfig.recording,
+      ...(nextConfig.recording ?? {}),
+      remote: {
+        ...defaultConfig.recording.remote,
+        ...(nextConfig.recording?.remote ?? {})
+      }
+    },
+    radios: nextConfig.radios ?? defaultConfig.radios
+  };
+}
+
 function saveConfig(nextConfig) {
-  config = { ...defaultConfig, ...nextConfig, radios: nextConfig.radios ?? defaultConfig.radios };
+  config = normalizeConfig(nextConfig);
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   log("Radio configuration saved.");
   return config;
@@ -333,10 +357,16 @@ function recordingStoreUsage() {
 }
 
 function recordingStatus() {
-  const usage = recordingStoreUsage();
+  const localEnabled = recordingLocalEnabled();
+  const usage = localEnabled ? recordingStoreUsage() : { bytes: 0, files: 0 };
   const storageBytes = Number(config.recording?.storageBytes) || 0;
   return {
     enabled: Boolean(config.recording?.enabled),
+    localEnabled,
+    remoteEnabled: recordingRemoteEnabled(),
+    remoteHost: config.recording?.remote?.host ?? "",
+    remotePort: Number(config.recording?.remote?.port) || 0,
+    remoteProtocol: config.recording?.remote?.protocol ?? "atm-vcs-recorder-udp-v1",
     format: config.recording?.format,
     exportFormat: config.recording?.exportFormat,
     retentionDays: config.recording?.retentionDays,
@@ -346,10 +376,10 @@ function recordingStatus() {
     fileCount: usage.files,
     freePlannedBytes: storageBytes ? Math.max(0, storageBytes - usage.bytes) : null,
     ed137RecorderInterface: config.recording?.ed137RecorderInterface ?? "planned",
-    mp3EncoderAvailable: Boolean(findFfmpeg()),
-    storePath: recordingDir,
-    exportPath: exportDir,
-    indexPath: recordingMetaPath
+    mp3EncoderAvailable: localEnabled ? Boolean(findFfmpeg()) : false,
+    storePath: localEnabled ? recordingDir : null,
+    exportPath: localEnabled ? exportDir : null,
+    indexPath: localEnabled ? recordingMetaPath : null
   };
 }
 
@@ -361,15 +391,19 @@ function evaluateSystemAlarms() {
   } else {
     clearAlarm("rx-rtp", "RTP_DEST_IP_MISSING", { desiredLocalIp, hostIps });
   }
-  if (config.recording?.enabled && !findFfmpeg()) {
+  if (recordingLocalEnabled() && !findFfmpeg()) {
     raiseAlarm({ source: "recording", code: "MP3_ENCODER_MISSING", severity: "warning", message: "MP3 extraction is unavailable because ffmpeg is not installed or FFMPEG_PATH is not set." });
   } else {
     clearAlarm("recording", "MP3_ENCODER_MISSING");
   }
-  const usage = recordingStoreUsage();
   const storageBytes = Number(config.recording?.storageBytes) || 0;
-  if (storageBytes && usage.bytes > storageBytes * 0.9) {
-    raiseAlarm({ source: "recording", code: "STORAGE_HIGH", severity: "critical", message: "Recording storage usage is above 90%.", details: { usedBytes: usage.bytes, storageBytes } });
+  if (recordingLocalEnabled() && storageBytes) {
+    const usage = recordingStoreUsage();
+    if (usage.bytes > storageBytes * 0.9) {
+      raiseAlarm({ source: "recording", code: "STORAGE_HIGH", severity: "critical", message: "Recording storage usage is above 90%.", details: { usedBytes: usage.bytes, storageBytes } });
+    } else {
+      clearAlarm("recording", "STORAGE_HIGH");
+    }
   } else {
     clearAlarm("recording", "STORAGE_HIGH");
   }
@@ -377,6 +411,30 @@ function evaluateSystemAlarms() {
 
 function appendRecordingMeta(event) {
   appendFileSync(recordingMetaPath, `${JSON.stringify(event)}\n`);
+}
+
+function recordingLocalEnabled() {
+  return Boolean(config.recording?.enabled && config.recording?.localEnabled !== false);
+}
+
+function recordingRemoteEnabled() {
+  return Boolean(config.recording?.enabled && config.recording?.remote?.enabled && config.recording?.remote?.host);
+}
+
+function sendRemoteRecordingEvent(event, payload = Buffer.alloc(0)) {
+  if (!recordingRemoteEnabled()) return;
+  const host = String(config.recording.remote.host);
+  const port = Number(config.recording.remote.port) || 45000;
+  const header = Buffer.from(JSON.stringify({ protocol: "atm-vcs-recorder-udp-v1", ...event }));
+  if (header.length > 65500 || payload.length > 60000) return;
+  const packet = Buffer.alloc(6 + header.length + payload.length);
+  packet.write("AVR1", 0, "ascii");
+  packet.writeUInt16BE(header.length, 4);
+  header.copy(packet, 6);
+  payload.copy(packet, 6 + header.length);
+  remoteRecorderSocket.send(packet, port, host, (error) => {
+    if (error) log(`Remote recorder send failed: ${error.message}`);
+  });
 }
 
 function findFfmpeg() {
@@ -413,28 +471,32 @@ function exportRecordingMp3(session) {
 }
 
 function startRecordingSession(radio, localIp, callId, direction = "TX", remoteIp = radio.ip) {
-  if (!config.recording?.enabled) return null;
+  if (!config.recording?.enabled || (!recordingLocalEnabled() && !recordingRemoteEnabled())) return null;
   const startedAtIso = new Date().toISOString();
   const id = `${startedAtIso.replace(/[:.]/g, "-")}_${safeFileToken(radio.id)}_${safeFileToken(direction)}_${randomToken()}`;
   const fileName = `${id}.pcma`;
   const filePath = path.join(recordingDir, fileName);
   const retentionDays = Number(config.recording?.retentionDays) || 30;
   const retainedUntil = new Date(Date.parse(startedAtIso) + retentionDays * 86400000).toISOString();
-  const session = { id, radioId: radio.id, radioLabel: radio.label, frequency: radio.frequency, direction, startedAt: startedAtIso, retainedUntil, localIp, remoteIp, callId, fileName, filePath, packets: 0, bytes: 0 };
-  appendRecordingMeta({ type: "start", ...session });
+  const session = { id, radioId: radio.id, radioLabel: radio.label, frequency: radio.frequency, direction, startedAt: startedAtIso, retainedUntil, localIp, remoteIp, callId, fileName, filePath, local: recordingLocalEnabled(), remote: recordingRemoteEnabled(), packets: 0, bytes: 0 };
+  if (session.local) appendRecordingMeta({ type: "start", ...session });
+  sendRemoteRecordingEvent({ type: "start", session: { ...session, filePath: undefined } });
   return session;
 }
 
 function writeRecordingPayload(session, payload) {
   if (!session) return;
-  appendFileSync(session.filePath, payload);
+  if (session.local) appendFileSync(session.filePath, payload);
+  sendRemoteRecordingEvent({ type: "payload", id: session.id, sequence: session.packets, timestamp: Date.now() }, payload);
   session.packets += 1;
   session.bytes += payload.length;
 }
 
 function stopRecordingSession(session) {
   if (!session) return;
-  appendRecordingMeta({ type: "stop", ...session, stoppedAt: new Date().toISOString() });
+  const stoppedAt = new Date().toISOString();
+  if (session.local) appendRecordingMeta({ type: "stop", ...session, stoppedAt });
+  sendRemoteRecordingEvent({ type: "stop", id: session.id, stoppedAt, packets: session.packets, bytes: session.bytes });
 }
 
 function enforceRecordingRetention(reason = "scheduled") {
@@ -2081,8 +2143,12 @@ server.listen(port, host, () => {
   startUdpDebugListeners();
   setTimeout(() => startRxSipMonitors().catch((error) => log(`Startup RX SIP monitor failed: ${error.message}`)), 1500);
   setInterval(() => startRxSipMonitors().catch((error) => log(`RX SIP monitor retry failed: ${error.message}`)), 30000);
-  scheduleRecordingRetention();
-  log(`Recording retention scheduled daily at ${config.recording?.retentionRunTime ?? "02:00"}.`);
+  if (recordingLocalEnabled()) {
+    scheduleRecordingRetention();
+    log(`Recording retention scheduled daily at ${config.recording?.retentionRunTime ?? "02:00"}.`);
+  } else {
+    log("Local recording disabled; retention scan is not scheduled.");
+  }
   evaluateSystemAlarms();
   setInterval(evaluateSystemAlarms, 30000);
   pollRadios("startup").catch((error) => log(`Startup radio poll failed: ${error.message}`));

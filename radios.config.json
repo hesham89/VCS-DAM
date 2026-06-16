@@ -10,13 +10,20 @@
     "snmpTrapBindIp":  "0.0.0.0",
     "snmpTrapPort":  162,
     "recording":  {
-                      "enabled":  true,
+                      "enabled":  false,
+                      "localEnabled":  false,
                       "retentionDays":  30,
                       "retentionRunTime":  "02:00",
                       "storageBytes":  8796093022208,
                       "format":  "PCMA/8000 raw payload with JSONL metadata",
                       "exportFormat":  "MP3 via ffmpeg",
-                      "ed137RecorderInterface":  "planned"
+                      "ed137RecorderInterface":  "planned",
+                      "remote":  {
+                                     "enabled":  false,
+                                     "host":  "",
+                                     "port":  45000,
+                                     "protocol":  "atm-vcs-recorder-udp-v1"
+                                 }
                   },
     "radios":  [
                    {
