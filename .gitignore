@@ -1,0 +1,20 @@
+# Runtime logs and router session cookies
+logs/
+*.cookies.txt
+
+# Audio recordings and exported media
+recordings/
+
+# Local/generated backups
+*.zip
+prototype-backup-*/
+vcshusam-backups/
+
+# Dependencies and OS/editor noise
+node_modules/
+__pycache__/
+*.pyc
+.env
+.env.*
+.DS_Store
+Thumbs.db

@@ -1,0 +1,10 @@
+{
+  "name": "jotron-voip-vcs",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node atm_vcs_server.mjs",
+    "legacy": "node vcs_test_server.mjs"
+  }
+}
