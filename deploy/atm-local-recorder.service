@@ -1,0 +1,28 @@
+[Unit]
+Description=ATM Local Voice Recording and Playback Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atm-recorder
+Group=atm-recorder
+WorkingDirectory=/opt/atm-local-recorder
+Environment=LOCAL_RECORDER_BIND_HOST=0.0.0.0
+Environment=LOCAL_RECORDER_HTTPS_PORT=8443
+Environment=LOCAL_RECORDER_HTTP_PORT=8080
+Environment=LOCAL_RECORDER_DIR=/recordings/atm-vcs
+Environment=VCS_WS_URL=wss://5.1.1.243:3443/ws
+Environment=RECORDER_SEGMENT_SECONDS=300
+ExecStart=/usr/bin/node /opt/atm-local-recorder/atm_local_recorder.mjs
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/recordings /opt/atm-local-recorder
+StandardOutput=append:/opt/atm-local-recorder/logs/service.out.log
+StandardError=append:/opt/atm-local-recorder/logs/service.err.log
+
+[Install]
+WantedBy=multi-user.target

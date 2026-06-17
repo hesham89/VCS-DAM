@@ -33,6 +33,12 @@ const defaultConfig = {
   snmpPort: 161,
   snmpTrapBindIp: process.env.SNMP_TRAP_BIND_IP ?? "5.1.1.248",
   snmpTrapPort: Number.parseInt(process.env.SNMP_TRAP_PORT ?? "162", 10),
+  localRecorder: {
+    enabled: true,
+    txWebSocketUrl: "wss://10.50.0.215:8443/tx",
+    uiUrl: "https://10.50.0.215:8443/",
+    browserRxDuplicate: true
+  },
   recording: {
     enabled: true,
     localEnabled: true,
@@ -117,6 +123,10 @@ function normalizeConfig(nextConfig = {}) {
         ...defaultConfig.recording.remote,
         ...(nextConfig.recording?.remote ?? {})
       }
+    },
+    localRecorder: {
+      ...defaultConfig.localRecorder,
+      ...(nextConfig.localRecorder ?? {})
     },
     radios: nextConfig.radios ?? defaultConfig.radios
   };
@@ -1700,6 +1710,7 @@ function publicState() {
     snmpPort: config.snmpPort,
     snmpTrapBindIp: config.snmpTrapBindIp,
     snmpTrapPort: config.snmpTrapPort,
+    localRecorder: config.localRecorder,
     radios: configuredRadios(),
     applications: configuredApplications(),
     radioStatus: Object.fromEntries(radioStatus),
@@ -1915,7 +1926,7 @@ function page(title, body) {
 
 function clientScript(surface) {
   return `
-  let ws, state, selectedRadioId, audioContext, processor, source, stream, resample={buffer:[],position:0}, queue=[], rxAudioContext, rxProcessor, rxGain, rxSampleQueue=[], rxAudioEnabled=false, adminEditorDirty=false, adminEditorRendered=false;
+  let ws, state, selectedRadioId, audioContext, processor, source, stream, resample={buffer:[],position:0}, queue=[], rxAudioContext, rxProcessor, rxGain, rxSampleQueue=[], rxAudioEnabled=false, adminEditorDirty=false, adminEditorRendered=false, recorderWs=null, recorderTxRadioId=null, recorderReconnectAt=0, recorderPendingStart=null;
   const $=id=>document.getElementById(id);
   function connect(){const proto=location.protocol==='https:'?'wss://':'ws://';ws=new WebSocket(proto+location.host+'/ws');ws.binaryType='arraybuffer';ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==='state'){state=m.state;render()}if(m.type==='error')alert(m.message);if(m.type==='rx-audio')playRxAudio(m)};ws.onclose=()=>setTimeout(connect,1000)}
   function render(){if(!state)return;const log=$('log');if(log)log.textContent=state.log;if('${surface}'==='controller'){renderController();bindControllerToggles()}else if('${surface}'==='recording')renderRecording();else renderAdmin()}
@@ -1941,17 +1952,23 @@ function clientScript(surface) {
   function exportName(r){return String((r.frequency||'unknown')+'_'+String(r.startedAt||'').replaceAll(':','-').replaceAll('.','-')+'_PTT.mp3').replace(/[^a-z0-9_.-]+/gi,'_')}
   async function renderRecording(){const rec=state.recording;$('recEnabled').textContent=rec.enabled?'Enabled':'Disabled';$('recRetention').textContent=rec.retentionDays+' days';$('recEd137').textContent=rec.ed137RecorderInterface;$('recStorage').textContent=fmtBytes(rec.storageBytes);$('recUsed').textContent=fmtBytes(rec.usedBytes);$('recFiles').textContent=String(rec.fileCount);$('recSchedule').textContent='Daily '+rec.retentionRunTime;$('recMp3').textContent=rec.mp3EncoderAvailable?'Available':'ffmpeg missing';$('recExportFormat').textContent=rec.exportFormat;const rows=await fetch('/api/recording/search').then(r=>r.json()).catch(()=>[]);$('recordings').innerHTML=rows.length?rows.map(r=>'<article class="recording-item"><h3>'+r.radioLabel+' '+r.direction+'</h3><dl><dt>Frequency</dt><dd>'+r.frequency+'</dd><dt>Started</dt><dd>'+r.startedAt+'</dd><dt>Stopped</dt><dd>'+(r.stoppedAt||'-')+'</dd><dt>Retain Until</dt><dd>'+(r.retainedUntil||'-')+'</dd><dt>Packets</dt><dd>'+(r.packets||0)+'</dd><dt>Bytes</dt><dd>'+fmtBytes(r.bytes||0)+'</dd><dt>MP3 Name</dt><dd>'+exportName(r)+'</dd><dt>Extract</dt><dd><a href="/api/recording/export?id='+encodeURIComponent(r.id)+'">MP3</a></dd></dl></article>').join(''):'<article class="recording-item"><h3>No recordings yet</h3><p>TX sessions will appear here after PTT audio is transmitted.</p></article>'}
   function downsample(input,rate){for(let i=0;i<input.length;i++)resample.buffer.push(input[i]);const ratio=rate/8000,outLen=Math.max(0,Math.floor((resample.buffer.length-resample.position)/ratio)),pcm=new Int16Array(outLen);let peak=0;for(let i=0;i<outLen;i++){const start=resample.position+i*ratio,end=start+ratio,a=Math.floor(start),b=Math.min(resample.buffer.length,Math.ceil(end));let sum=0,count=0;for(let j=a;j<b;j++){sum+=resample.buffer[j]||0;count++}let s=count?sum/count:0;s=Math.max(-1,Math.min(1,s*1.1));peak=Math.max(peak,Math.abs(s));pcm[i]=s*24000}resample.position+=outLen*ratio;const drop=Math.floor(resample.position);if(drop){resample.buffer=resample.buffer.slice(drop);resample.position-=drop}const meter=$('level');if(meter)meter.value=peak;return pcm}
-  function sendFrames(pcm){queue.push(...pcm);while(queue.length>=160){const f=new Int16Array(160);for(let i=0;i<160;i++)f[i]=queue[i];queue=queue.slice(160);ws.send(f.buffer)}}
+  function recorderConnect(){const cfg=state?.localRecorder;if(!cfg?.enabled||!cfg.txWebSocketUrl)return null;if(recorderWs&&(recorderWs.readyState===WebSocket.OPEN||recorderWs.readyState===WebSocket.CONNECTING))return recorderWs;if(Date.now()<recorderReconnectAt)return null;try{recorderWs=new WebSocket(cfg.txWebSocketUrl);recorderWs.binaryType='arraybuffer';recorderWs.onopen=()=>{if(recorderPendingStart)recorderJson(recorderPendingStart)};recorderWs.onclose=()=>{recorderReconnectAt=Date.now()+3000};recorderWs.onerror=()=>{recorderReconnectAt=Date.now()+3000};return recorderWs}catch{return null}}
+  function recorderJson(msg){const r=recorderConnect();if(r&&r.readyState===WebSocket.OPEN)try{r.send(JSON.stringify(msg))}catch{}}
+  function recorderRx(m){if(state?.localRecorder?.browserRxDuplicate)recorderJson({type:'rx-audio',radioId:m.radioId,frequency:m.frequency,payloadType:m.payloadType,payload:m.payload})}
+  function recorderPcm(buffer){const r=recorderConnect();if(r&&r.readyState===WebSocket.OPEN)try{r.send(buffer.slice(0))}catch{}}
+  function recorderStart(tx){recorderTxRadioId=tx?.id||null;recorderPendingStart={type:'tx-start',radioId:tx?.id,radioLabel:tx?.label,frequency:tx?.frequency,operator:'controller-browser',browserSessionId:String(Date.now())};recorderConnect();recorderJson(recorderPendingStart)}
+  function recorderStop(){if(recorderTxRadioId)recorderJson({type:'tx-stop',radioId:recorderTxRadioId});recorderTxRadioId=null;recorderPendingStart=null}
+  function sendFrames(pcm){queue.push(...pcm);while(queue.length>=160){const f=new Int16Array(160);for(let i=0;i<160;i++)f[i]=queue[i];queue=queue.slice(160);ws.send(f.buffer);recorderPcm(f.buffer)}}
   function decodeAlawByte(a){a^=0x55;const sign=a&0x80,exp=(a&0x70)>>4,mant=a&0x0f;let sample=exp===0?(mant<<4)+8:((mant<<4)+0x108)<<(exp-1);return (sign?sample:-sample)/32768}
   function decodeUlawByte(u){u=(~u)&0xff;const sign=u&0x80,exp=(u>>4)&7,mant=u&15;let sample=((mant<<3)+0x84)<<exp;sample-=0x84;return (sign?-sample:sample)/32768}
   function b64bytes(b64){const bin=atob(b64),out=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)out[i]=bin.charCodeAt(i);return out}
   async function enableRxAudio(){rxAudioContext ||= new AudioContext({latencyHint:'interactive'});if(!rxProcessor){rxProcessor=rxAudioContext.createScriptProcessor(1024,0,1);rxGain=rxAudioContext.createGain();rxGain.gain.value=2.4;rxProcessor.onaudioprocess=e=>{const out=e.outputBuffer.getChannelData(0),need=out.length,ratio=8000/rxAudioContext.sampleRate;let p=0;for(let i=0;i<need;i++){const srcIndex=Math.floor(p);out[i]=srcIndex<rxSampleQueue.length?rxSampleQueue[srcIndex]:0;p+=ratio}const used=Math.floor(p);if(used>0)rxSampleQueue.splice(0,Math.min(used,rxSampleQueue.length));if(rxSampleQueue.length>8000)rxSampleQueue.splice(0,rxSampleQueue.length-4000)};rxProcessor.connect(rxGain);rxGain.connect(rxAudioContext.destination)}if(rxAudioContext.state!=='running')await rxAudioContext.resume();rxAudioEnabled=true;const b=$('rxAudio');b.textContent='RX Audio On';b.classList.add('enabled')}
   async function disableRxAudio(){rxAudioEnabled=false;rxSampleQueue=[];if(rxGain)rxGain.gain.value=0;if(rxAudioContext&&rxAudioContext.state==='running')await rxAudioContext.suspend().catch(()=>{});const b=$('rxAudio');b.textContent='Enable RX Audio';b.classList.remove('enabled')}
   async function toggleRxAudio(){if(rxAudioEnabled)await disableRxAudio();else{if(rxGain)rxGain.gain.value=2.4;await enableRxAudio()}}
-  function playRxAudio(m){const app=selectedApp(),rxRadio=app?.rx;if(rxRadio&&m.radioId&&m.radioId!==rxRadio.id)return;if(!rxAudioEnabled||!rxAudioContext)return;if(rxAudioContext.state==='suspended')rxAudioContext.resume().catch(()=>{});const bytes=b64bytes(m.payload),ulaw=Number(m.payloadType)===0;for(let i=0;i<bytes.length;i++)rxSampleQueue.push(Math.max(-1,Math.min(1,(ulaw?decodeUlawByte(bytes[i]):decodeAlawByte(bytes[i])))))}
+  function playRxAudio(m){recorderRx(m);const app=selectedApp(),rxRadio=app?.rx;if(rxRadio&&m.radioId&&m.radioId!==rxRadio.id)return;if(!rxAudioEnabled||!rxAudioContext)return;if(rxAudioContext.state==='suspended')rxAudioContext.resume().catch(()=>{});const bytes=b64bytes(m.payload),ulaw=Number(m.payloadType)===0;for(let i=0;i<bytes.length;i++)rxSampleQueue.push(Math.max(-1,Math.min(1,(ulaw?decodeUlawByte(bytes[i]):decodeAlawByte(bytes[i])))))}
   async function startMic(){if(audioContext&&audioContext.state!=='closed')return;resample={buffer:[],position:0};queue=[];stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,sampleRate:48000,echoCancellation:false,noiseSuppression:false,autoGainControl:false}});const ctx=new AudioContext({sampleRate:48000,latencyHint:'interactive'});audioContext=ctx;source=ctx.createMediaStreamSource(stream);processor=ctx.createScriptProcessor(2048,1,1);processor.onaudioprocess=e=>{if(!audioContext||audioContext!==ctx||ctx.state==='closed')return;sendFrames(downsample(e.inputBuffer.getChannelData(0),ctx.sampleRate))};const g=ctx.createGain();g.gain.value=0;source.connect(processor);processor.connect(g);g.connect(ctx.destination)}
   async function stopMic(){const ctx=audioContext;if(processor)processor.onaudioprocess=null;if(processor)processor.disconnect();if(source)source.disconnect();if(stream)stream.getTracks().forEach(t=>t.stop());processor=source=audioContext=stream=null;queue=[];if(ctx&&ctx.state!=='closed')await ctx.close().catch(()=>{})}
-  if('${surface}'==='controller'){$('rxAudio').onclick=()=>toggleRxAudio();$('ptt').onpointerdown=async e=>{e.preventDefault();const tx=selectedTx();if(!tx||!tx.enabled||tx.txEnabled===false)return;await startMic();ws.send(JSON.stringify({type:'ptt-start',radioId:tx.id,applicationId:selectedApp()?.id}))};window.onpointerup=async()=>{if(state?.active){ws.send(JSON.stringify({type:'ptt-stop'}));await stopMic()}}}
+  if('${surface}'==='controller'){$('rxAudio').onclick=()=>toggleRxAudio();$('ptt').onpointerdown=async e=>{e.preventDefault();const tx=selectedTx();if(!tx||!tx.enabled||tx.txEnabled===false)return;await startMic();recorderStart(tx);ws.send(JSON.stringify({type:'ptt-start',radioId:tx.id,applicationId:selectedApp()?.id}))};window.onpointerup=async()=>{if(state?.active){ws.send(JSON.stringify({type:'ptt-stop'}));recorderStop();await stopMic()}}}
   if('${surface}'==='admin'){$('addRadio').onclick=()=>{const id='app'+Date.now();const app={id,label:'New Application',rx:{id:id+'-rx',role:'rx',ip:'',webHost:'',sipHost:'',rtpHost:'',frequency:'',mode:'auto',sipPort:5060,rtpPort:3004,enabled:false},tx:{id:id+'-tx',role:'tx',ip:'',webHost:'',sipHost:'',rtpHost:'',frequency:'',mode:'auto',sipPort:5060,rtpPort:3004,enabled:false}};adminEditorDirty=true;$('editor').insertAdjacentHTML('beforeend',appRow(app));bindEditor()};$('save').onclick=()=>{const radios=[];document.querySelectorAll('.app-edit').forEach(app=>{const appId=app.dataset.app||('app'+Date.now()),appLabel=app.querySelector('[data-k="applicationLabel"]')?.value||appId;app.querySelectorAll('.side-box').forEach(side=>{const role=side.dataset.side,old=state.radios.find(r=>r.id===side.dataset.id)||{id:side.dataset.id||appId+'-'+role,role,sipPort:5060,rtpPort:3004,txEnabled:true,rxEnabled:true};const next={...old,role,applicationId:appId,applicationLabel:appLabel,label:appLabel+' '+role.toUpperCase()};side.querySelectorAll('[data-k]').forEach(i=>{let v=i.type==='checkbox'?i.checked:i.value;if(['webPort','sipPort','rtpPort','controlPort','snmpPort','localRtpPort'].includes(i.dataset.k))v=Number(v)||undefined;next[i.dataset.k]=v});if(!next.ip)next.ip=next.webHost||next.sipHost||next.rtpHost||'';if(next.webHost||next.sipHost||next.rtpHost||next.ip||next.frequency||next.enabled)radios.push(next)})});adminEditorDirty=false;adminEditorRendered=false;ws.send(JSON.stringify({type:'save-radios',radios}))};$('check').onclick=()=>ws.send(JSON.stringify({type:'check-radios'}));$('snmp').onclick=()=>ws.send(JSON.stringify({type:'check-snmp'}))}
   if('${surface}'==='recording'){$('refreshRecordings').onclick=()=>renderRecording()}
   connect();if('${surface}'==='controller')setInterval(()=>{if(state)updateControllerMeters()},100);`;

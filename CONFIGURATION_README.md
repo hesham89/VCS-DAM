@@ -6,11 +6,15 @@ This file documents the current VCS project configuration, network settings, rou
 
 - `atm_vcs_server.mjs`: main ATM VCS web/controller service.
 - `atm_remote_recorder.mjs`: standalone UDP recording receiver for a separate airport recording server.
+- `atm_local_recorder.mjs`: local Ricochet-style recording/playback server for operator-side RX/TX stream copies.
 - `radios.config.json`: active radio, RTP, SNMP, recording, and application configuration.
 - `run_ubuntu.sh`: ready-to-run Ubuntu installer/service setup script.
 - `deploy/atm-vcs.service`: systemd service template.
 - `deploy/atm-remote-recorder.service`: systemd service template for the separate recorder server.
+- `deploy/atm-local-recorder.service`: systemd service template for the local recorder server.
 - `scripts/install_remote_recorder_ubuntu.sh`: Ubuntu installer for the separate recorder server.
+- `scripts/install_local_recorder_ubuntu.sh`: Ubuntu installer for the local recorder server.
+- `scripts/setup_voip_recording_disk.sh`: prepares the `voip` VM recording disk and mounts it at `/recordings`.
 - `README.md`: original project notes.
 - `docs/`: implementation and deployment notes.
 - `logs/`: local test logs and captured router pages.
@@ -59,6 +63,7 @@ Global VCS settings:
 - Recording enabled on VCS server: no
 - Local VCS recording enabled: no
 - Remote recorder forwarding: configured in software, disabled until the recorder server IP is set
+- Local recorder client: enabled for operator-side RX/TX stream duplication to `wss://10.50.0.215:8443/tx`
 - Recording retention: 30 days
 - Recording export: MP3 through `ffmpeg`
 
@@ -280,6 +285,58 @@ To disable all recording and all recorder forwarding on the VCS server:
     "enabled": false
   }
 }
+```
+
+## Local Operator-Side Recorder
+
+The current recording architecture keeps the Ubuntu VCS server out of recording storage and conversion work. The local `voip` VM records the streams received on the operator side:
+
+- RX audio is duplicated by the operator browser from the VCS `rx-audio` stream to the local recorder.
+- TX microphone audio is duplicated by the operator browser to the local recorder while PTT is active.
+- The VCS server still performs live TX/RX only and does not write recording files.
+- The local recorder also has a direct VCS WebSocket subscriber mode for future use when the `voip` VM has a route to the VCS WebSocket endpoint.
+
+Recorder server:
+
+```text
+Host: voip
+IP: 10.50.0.215
+Service: atm-local-recorder.service
+UI: https://10.50.0.215:8443/
+Health: http://10.50.0.215:8080/api/health
+Storage mount: /recordings
+Recorder data: /recordings/atm-vcs
+```
+
+Proxmox storage:
+
+```text
+Proxmox host: 10.50.0.10
+VM ID: 101
+Added disk: scsi1, 500 GB from local-lvm
+Guest device: /dev/sdb1
+Mount: /recordings
+Filesystem: ext4
+```
+
+VCS config block:
+
+```json
+"localRecorder": {
+  "enabled": true,
+  "txWebSocketUrl": "wss://10.50.0.215:8443/tx",
+  "uiUrl": "https://10.50.0.215:8443/",
+  "browserRxDuplicate": true
+}
+```
+
+Useful commands on `voip`:
+
+```bash
+sudo systemctl status atm-local-recorder.service
+sudo journalctl -u atm-local-recorder.service -f
+df -hT /recordings
+curl -k https://127.0.0.1:8443/api/health
 ```
 
 ## Manual Run Without systemd

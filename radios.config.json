@@ -10,6 +10,12 @@
     "snmpPort":  161,
     "snmpTrapBindIp":  "0.0.0.0",
     "snmpTrapPort":  162,
+    "localRecorder":  {
+                          "enabled":  true,
+                          "txWebSocketUrl":  "wss://10.50.0.215:8443/tx",
+                          "uiUrl":  "https://10.50.0.215:8443/",
+                          "browserRxDuplicate":  true
+                      },
     "recording":  {
                       "enabled":  false,
                       "localEnabled":  false,
@@ -29,7 +35,7 @@
     "radios":  [
                    {
                        "txEnabled":  false,
-                       "rxEnabled":  false,
+                       "rxEnabled":  true,
                        "id":  "dev2-rx",
                        "label":  "ATIS / TX 1 RX",
                        "role":  "rx",
