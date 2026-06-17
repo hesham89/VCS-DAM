@@ -28,6 +28,7 @@ const defaultConfig = {
   radioPollSeconds: 15,
   rxListenPort: Number.parseInt(process.env.RX_LISTEN_PORT ?? "3004", 10),
   rxSilenceMs: 1500,
+  rxStaleSeconds: 30,
   snmpCommunity: "public",
   snmpPort: 161,
   snmpTrapBindIp: process.env.SNMP_TRAP_BIND_IP ?? "5.1.1.248",
@@ -406,6 +407,29 @@ function evaluateSystemAlarms() {
     }
   } else {
     clearAlarm("recording", "STORAGE_HIGH");
+  }
+  const staleMs = Math.max(10, Number(config.rxStaleSeconds) || 30) * 1000;
+  for (const radio of configuredRadios().filter((item) => item.role === "rx" && item.enabled !== false && item.rxEnabled !== false)) {
+    const current = rxStats.byRadio[radio.id];
+    const ageMs = current?.lastPacketAt ? Date.now() - Date.parse(current.lastPacketAt) : Number.POSITIVE_INFINITY;
+    if (!current?.lastPacketAt || ageMs > staleMs) {
+      raiseAlarm({
+        source: radio.id,
+        code: "RX_RTP_STALE",
+        severity: "warning",
+        message: `${radio.label} has no recent RTP on UDP ${rxLocalPort(radio)}. Last RTP: ${current?.lastPacketAt ?? "never"} from ${current?.lastSource ?? "unknown"}.`,
+        details: {
+          radioId: radio.id,
+          radioIp: radio.ip,
+          localRtpPort: rxLocalPort(radio),
+          lastPacketAt: current?.lastPacketAt ?? null,
+          lastSource: current?.lastSource ?? null,
+          staleSeconds: Math.round(ageMs / 1000)
+        }
+      });
+    } else {
+      clearAlarm(radio.id, "RX_RTP_STALE", { lastPacketAt: current.lastPacketAt, lastSource: current.lastSource });
+    }
   }
 }
 

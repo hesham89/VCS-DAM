@@ -5,6 +5,7 @@
     "radioPollSeconds":  15,
     "rxListenPort":  3004,
     "rxSilenceMs":  1500,
+    "rxStaleSeconds":  30,
     "snmpCommunity":  "public",
     "snmpPort":  161,
     "snmpTrapBindIp":  "0.0.0.0",
